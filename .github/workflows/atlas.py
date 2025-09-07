@@ -1,3 +1,4 @@
+print(" Iniciando atlas.py...")
 import requests
 import yfinance as yf
 import json
