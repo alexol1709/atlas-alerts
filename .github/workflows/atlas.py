@@ -4,8 +4,8 @@ import os
 from datetime import datetime
 
 # === CONFIGURACIÓN ===
-TELEGRAM_BOT_TOKEN = "TU_TOKEN_AQUI"
-TELEGRAM_CHAT_ID = "TU_CHAT_ID_AQUI"
+TELEGRAM_BOT_TOKEN = "8181571309:AAHAZxlYcKlx7ZmIvH1JGLRVTKT5l3dp_kU"
+TELEGRAM_CHAT_ID = "7719744456"
 API_KEY = "demo"  # Reemplázalo con tu API Key real si usas Alpha Vantage u otro servicio
 FX_RATE = 18.5  # Tipo de cambio MXN/USD
 
