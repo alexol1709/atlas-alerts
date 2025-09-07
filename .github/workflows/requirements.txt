@@ -2,3 +2,4 @@ yfinance==0.2.36
 requests==2.31.0
 pandas==2.0.3
 python-telegram-bot==20.3
+pandas_datareader==0.10.0
