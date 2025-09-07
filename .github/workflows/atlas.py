@@ -34,13 +34,13 @@ def get_stock_data(ticker):
     Obtiene datos de la acción desde Yahoo Finance
     """
     data = yf.download(ticker, period="1d", interval="1m")
-    if data.empty:
-        return None
-    
-    last_price = float(data['Close'].dropna().iloc[-1])
-    vol_today = int(data['Volume'].iloc[-1])
-    vol_avg20 = int(data['Volume'].tail(20).mean())
-    return last_price, vol_today, vol_avg20
+    data = yf.download("CYTK", period="1d", interval="1m")
+
+if data.empty:
+    print("⚠️ No se pudo obtener datos para CYTK")
+else:
+    last_price = data["Close"].iloc[-1]
+    print(f"Último precio CYTK: {last_price}")
 
 # ===========================
 # LÓGICA DE ANÁLISIS
