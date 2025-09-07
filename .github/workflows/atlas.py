@@ -1,4 +1,21 @@
+# CONFIGURACIÓN TELEGRAM
+TELEGRAM_BOT_TOKEN = "8302867942:AAGh4S9byssyx_4FhCzPSVpdxjSo9AlS4Q4"
+TELEGRAM_CHAT_ID = "7719744456"
+
 import requests
+
+def send_telegram_message(message):
+    """
+    Envía un mensaje al bot de Telegram
+    """
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": message
+    }
+    response = requests.post(url, data=payload)
+    return response.json()
+    import requests
 import json
 import os
 from datetime import datetime
