@@ -1,9 +1,18 @@
-# CONFIGURACIÓN TELEGRAM
+import requests
+import yfinance as yf
+import json
+from datetime import datetime
+
+# ===========================
+# CONFIGURACIÓN
+# ===========================
 TELEGRAM_BOT_TOKEN = "8302867942:AAGh4S9byssyx_4FhCzPSVpdxjSo9AlS4Q4"
 TELEGRAM_CHAT_ID = "7719744456"
+FX_RATE = 18.5  # Tipo de cambio MXN/USD
 
-import requests
-
+# ===========================
+# FUNCIÓN PARA ENVIAR MENSAJES
+# ===========================
 def send_telegram_message(message):
     """
     Envía un mensaje al bot de Telegram
@@ -15,74 +24,71 @@ def send_telegram_message(message):
     }
     response = requests.post(url, data=payload)
     return response.json()
-    import requests
-import json
-import os
-from datetime import datetime
 
-# === CONFIGURACIÓN ===
-TELEGRAM_BOT_TOKEN = "8181571309:AAHAZxlYcKlx7ZmIvH1JGLRVTKT5l3dp_kU"
-TELEGRAM_CHAT_ID = "7719744456"
-API_KEY = "demo"  # Reemplázalo con tu API Key real si usas Alpha Vantage u otro servicio
-FX_RATE = 18.5  # Tipo de cambio MXN/USD
-
-# === CARGAR PORTAFOLIO ===
-with open("portfolio.json", "r") as f:
-    portfolio = json.load(f)
-
-# === FUNCIONES ===
-
-def send_telegram_message(message):
-    """Enviar mensaje a Telegram"""
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message}
-    requests.post(url, json=payload)
-
-def get_stock_price(symbol):
-    """Obtener precio actual de la acción"""
-    try:
-        url = f"https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol={symbol}&apikey={API_KEY}"
-        response = requests.get(url)
-        data = response.json()
-        price = float(data["Global Quote"]["05. price"])
-        return price
-    except:
+# ===========================
+# OBTENER DATOS DE UNA ACCIÓN
+# ===========================
+def get_stock_data(ticker):
+    """
+    Obtiene datos de la acción desde Yahoo Finance
+    """
+    data = yf.download(ticker, period="1d", interval="1m")
+    if data.empty:
         return None
+    
+    last_price = float(data['Close'].dropna().iloc[-1])
+    vol_today = int(data['Volume'].iloc[-1])
+    vol_avg20 = int(data['Volume'].tail(20).mean())
+    return last_price, vol_today, vol_avg20
 
-def check_signals(symbol, shares, buy_price):
-    """Analizar acción según reglas"""
-    current_price = get_stock_price(symbol)
-    if current_price is None:
-        return f"Error obteniendo precio de {symbol}"
+# ===========================
+# LÓGICA DE ANÁLISIS
+# ===========================
+def analyze_and_alert(ticker, shares, cost):
+    result = get_stock_data(ticker)
+    if not result:
+        send_telegram_message(f"❌ Error obteniendo precio de {ticker}")
+        return
 
-    # Calcular ganancia/pérdida
-    total_investment = shares * buy_price
-    current_value = shares * current_price
-    pl_usd = current_value - total_investment
-    pl_mxn = pl_usd * FX_RATE
+    last_price, vol_today, vol_avg20 = result
 
-    # Señales según tu estrategia
-    if current_price >= 53.50 and current_price < 55.00:
-        signal = "TAKE-PROFIT: Vender 50% de la posición."
-    elif current_price >= 55.00:
-        signal = "MOMENTUM: Vender 50% o aplicar trailing stop."
-    elif current_price <= 49.00:
-        signal = "PROTECT CAPITAL: Vender TODAS las acciones."
+    # Cálculo P/L
+    pnl_usd = (last_price - cost) * shares
+    pnl_mxn = pnl_usd * FX_RATE
+
+    # Decisión básica
+    if last_price < cost * 0.9:
+        action = "SELL"
+        reason = "Precio cayó más de 10%"
+    elif last_price > cost * 1.1:
+        action = "SELL"
+        reason = "Precio subió más de 10% (tomar ganancias)"
     else:
-        signal = "HOLD: Mantener posición."
+        action = "HOLD"
+        reason = "Dentro de rango normal"
 
+    # Mensaje final
     message = (
-        f"\n📊 {symbol}\n"
-        f"Precio actual: ${current_price:.2f} USD\n"
-        f"Ganancia/Pérdida: ${pl_usd:.2f} USD | ${pl_mxn:.2f} MXN\n"
-        f"Acciones: {shares}\n"
-        f"Señal: {signal}\n"
-        f"Fecha: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        f"📊 REPORTE {ticker}\n"
+        f"Fecha/Hora: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+        f"Precio Actual: {last_price:.2f} USD\n"
+        f"P/L: {pnl_usd:.2f} USD | {pnl_mxn:.2f} MXN\n"
+        f"Volumen Hoy: {vol_today:,}\n"
+        f"Volumen Prom 20d: {vol_avg20:,}\n\n"
+        f"✅ ACCIÓN: {action}\n"
+        f"Razón: {reason}"
     )
-    send_telegram_message(message)
-    return message
 
-# === EJECUCIÓN ===
-for symbol, data in portfolio.items():
-    result = check_signals(symbol, data["shares"], data["buy_price"])
-    print(result)
+    # Enviar reporte a Telegram
+    send_telegram_message(message)
+
+# ===========================
+# EJECUCIÓN
+# ===========================
+if __name__ == "__main__":
+    # Aquí defines tus parámetros
+    ticker = "CYTK"      # Cambia el ticker según la acción
+    shares = 10           # Número de acciones que tienes
+    cost = 52.00          # Precio de compra por acción en USD
+
+    analyze_and_alert(ticker, shares, cost)
