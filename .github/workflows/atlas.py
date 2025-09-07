@@ -4,9 +4,78 @@ import json
 import time
 from datetime import datetime, timezone
 
-import requests
-import pandas as pd
+# --- PRECIOS / OHLC CON SESIÓN PROPIA ---
+import requests, time
 import yfinance as yf
+import pandas as pd
+
+def _yf_session():
+    s = requests.Session()
+    # User-Agent “real” para que Yahoo no bloquee
+    s.headers.update({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+    })
+    return s
+
+def get_last_price_fast(ticker: str) -> float | None:
+    """Intenta precio con yfinance; si falla, devuelve None."""
+    try:
+        sess = _yf_session()
+        q = yf.Ticker(ticker, session=sess).fast_info
+        px = float(q.get("last_price") or q.get("lastPrice") or 0.0)
+        return px if px > 0 else None
+    except Exception:
+        return None
+
+def fetch_ohlc_daily(ticker: str, lookback_days: int = 30) -> pd.DataFrame:
+    """
+    OHLC diario. 1) yfinance con sesión propia;
+    2) fallback: Stooq (diario) si Yahoo falla.
+    """
+    # 1) Yahoo
+    try:
+        sess = _yf_session()
+        df = yf.download(
+            ticker, period=f"{lookback_days}d", interval="1d",
+            auto_adjust=True, progress=False, session=sess
+        )
+        if isinstance(df, pd.DataFrame) and not df.empty:
+            return df
+    except Exception:
+        pass
+
+    # 2) Fallback Stooq (sin intradía, solo diario)
+    try:
+        import pandas_datareader.data as web
+        df = web.DataReader(ticker, "stooq")  # devuelve del más reciente hacia atrás
+        df = df.sort_index()
+        # homogeneizamos nombres
+        df = df.rename(columns=str.title)
+        return df.tail(lookback_days)
+    except Exception:
+        return pd.DataFrame()
+
+def fetch_volume_today_and_avg20(ticker: str) -> tuple[int, float]:
+    """
+    Volumen de hoy y promedio 20d con Yahoo. Si falla, calcula con diario (fallback).
+    """
+    try:
+        sess = _yf_session()
+        hist = yf.Ticker(ticker, session=sess).history(period="1mo", interval="1d", auto_adjust=True)
+        if isinstance(hist, pd.DataFrame) and not hist.empty and "Volume" in hist.columns:
+            vol_today = int(hist["Volume"].iloc[-1])
+            ave20 = float(hist["Volume"].tail(20).mean())
+            return vol_today, ave20
+    except Exception:
+        pass
+
+    # Fallback con fetch_ohlc_daily
+    df = fetch_ohlc_daily(ticker, 30)
+    if not df.empty and "Volume" in df.columns:
+        vol_today = int(df["Volume"].iloc[-1])
+        ave20 = float(df["Volume"].tail(20).mean())
+        return vol_today, ave20
+    return 0, 0.0
 
 # =========================
 # CONFIG (defaults seguros)
