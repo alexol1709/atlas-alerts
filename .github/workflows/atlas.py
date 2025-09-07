@@ -25,194 +25,148 @@ STOP_ALL     = 49.00  # C) vender todo
 BOT_TOKEN = os.getenv("8302867942:AAGh4S9byssyx_4FhCzPSVpdxjSo9AlS4Q4", "").strip()
 CHAT_ID   = os.getenv("7719744456", "").strip()
 
-# FX override (si no está, se usa USDMXN=X)
-FX_OVERRIDE = os.getenv("FX_RATE", "").strip()
+# atlas.py — robusto para fuera de horario / fines de semana
 
-# =========================
-# Utilidades
-# =========================
-def log(msg: str):
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
+import os, json, math, time, datetime as dt
+import requests
+import yfinance as yf
 
-def send_telegram(text: str):
-    if not BOT_TOKEN or not CHAT_ID:
-        log("⚠️ TELEGRAM no configurado (TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID).")
-        return
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    payload = {"chat_id": CHAT_ID, "text": text}
+# ============ CONFIG ============
+TELEGRAM_BOT_TOKEN = os.getenv("8302867942:AAGh4S9byssyx_4FhCzPSVpdxjSo9AlS4Q4")
+TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID",   "7719744456")
+USD_MXN            = float(os.getenv("FX_RATE", "18.5"))  # usa valor aproximado si no hay FX live
+TICKER             = "CYTK"                               # único por ahora
+
+# Reglas del usuario:
+TAKE_PROFIT_A = 53.50
+MOMO_PRICE_B  = 55.00
+MOMO_VOL_X    = 1.5     # 150% del promedio 20d
+STOP_C        = 49.00
+
+# ============ UTIL ============
+
+def send_telegram(msg: str):
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "HTML"}
+    r = requests.post(url, json=payload, timeout=20)
+    r.raise_for_status()
+    return r.json()
+
+def robust_last_price_and_volume(ticker: str):
+    """
+    1) intenta 1m/5m intradía con prepost
+    2) si falla, usa 1h o diario
+    Devuelve: price (float), vol_hoy (int), vol_avg20 (float)
+    """
+    # intentos por orden
+    tries = [
+        dict(interval="1m", period="1d"),
+        dict(interval="5m", period="5d"),
+        dict(interval="1h", period="5d"),
+        dict(interval="1d", period="3mo"),
+    ]
+    last_price = None
+    vol_today  = None
+    vol_avg20  = None
+
+    # volumen promedio 20d (diario)
     try:
-        r = requests.post(url, json=payload, timeout=15)
-        if r.status_code != 200:
-            log(f"⚠️ Telegram error {r.status_code}: {r.text}")
-        else:
-            log("✅ Telegram enviado")
-    except Exception as e:
-        log(f"❌ Error enviando a Telegram: {e}")
+        ddf = yf.download(ticker, interval="1d", period="6mo", prepost=True, progress=False)
+        if not ddf.empty:
+            vol_avg20 = float(ddf["Volume"].tail(20).mean())
+    except Exception:
+        vol_avg20 = None
 
-def load_portfolio():
-    # Espera un archivo portfolio.json con {"stocks": ["CYTK", ...]}
-    path = "portfolio.json"
-    if os.path.exists(path):
+    for cfg in tries:
         try:
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            tickers = data.get("stocks", [])
-            if isinstance(tickers, list) and tickers:
-                return [t.upper() for t in tickers]
-        except Exception as e:
-            log(f"⚠️ No se pudo leer portfolio.json: {e}")
-    # fallback
-    return ["CYTK"]
+            df = yf.download(ticker, prepost=True, progress=False, **cfg)
+            if df is None or df.empty:
+                continue
+            # precio
+            last_price = float(df["Close"].dropna().iloc[-1])
+            # volumen de hoy: si la descarga fue intradía, suma; si fue diario, usa el último
+            if cfg["interval"] in ("1m","5m","1h"):
+                same_day = df.index.tz_convert("America/New_York") if hasattr(df.index, "tz_convert") else df.index
+                if hasattr(same_day, "date"):
+                    # agrupa por día
+                    vol_today = int(df["Volume"].fillna(0).tail(390).sum())
+                else:
+                    vol_today = int(df["Volume"].fillna(0).sum())
+            else:
+                vol_today = int(df["Volume"].dropna().iloc[-1])
+            # si aún no tenemos vol_avg20, intenta calcular con df diario
+            if vol_avg20 is None and cfg["interval"] == "1d":
+                vol_avg20 = float(df["Volume"].tail(20).mean())
+            break
+        except Exception:
+            continue
 
-def safe_download(ticker: str, period="1d", interval="1m", tries=2):
-    """
-    Descarga con reintentos y valida DataFrame no vacío y columnas esperadas.
-    """
-    for i in range(tries):
-        try:
-            df = yf.download(
-                ticker, period=period, interval=interval,
-                progress=False, prepost=True, auto_adjust=False
-            )
-            if isinstance(df, pd.DataFrame) and not df.empty:
-                # Algunas veces yfinance devuelve columnas multi-index
-                if isinstance(df.columns, pd.MultiIndex):
-                    # Tomamos la columna 'Close' del primer nivel
-                    close = df["Close"]
-                    if isinstance(close, pd.DataFrame):
-                        # Si hay múltiples, tomar primera serie
-                        close = close.iloc[:, 0]
-                    df_simple = pd.DataFrame({
-                        "Open":  df["Open"].iloc[:, 0] if isinstance(df["Open"],  pd.DataFrame) else df["Open"],
-                        "High":  df["High"].iloc[:, 0] if isinstance(df["High"],  pd.DataFrame) else df["High"],
-                        "Low":   df["Low"].iloc[:, 0]  if isinstance(df["Low"],   pd.DataFrame) else df["Low"],
-                        "Close": close,
-                        "Volume": df["Volume"].iloc[:, 0] if isinstance(df["Volume"], pd.DataFrame) else df["Volume"],
-                    })
-                    df = df_simple
-                # Validar columnas
-                needed = {"Open", "High", "Low", "Close", "Volume"}
-                if needed.issubset(set(df.columns)):
-                    return df
-            log(f"Intento {i+1}/{tries}: descarga vacía para {ticker}")
-        except Exception as e:
-            log(f"Intento {i+1}/{tries}: error descargando {ticker}: {e}")
-        time.sleep(1.5)
-    return pd.DataFrame()
+    return last_price, vol_today, vol_avg20
 
-def get_last_price_volume(ticker: str):
-    """
-    Devuelve (last_price, vol_today, vol20_avg).
-    vol20_avg se calcula con datos diarios 6m para aproximar la media 20d.
-    """
-    intr = safe_download(ticker, period="1d", interval="1m")
-    if intr.empty:
-        raise RuntimeError(f"No se pudo obtener intradía de {ticker}")
-
-    last_row = intr.iloc[-1]
-    last_price = float(last_row["Close"])
-
-    daily = safe_download(ticker, period="6mo", interval="1d")
-    if daily.empty:
-        raise RuntimeError(f"No se pudo obtener diarios de {ticker}")
-
-    vol_today = int(daily["Volume"].iloc[-1])
-    vol20_avg = float(daily["Volume"].tail(20).mean())
-
-    return last_price, vol_today, vol20_avg
-
-def get_fx_usdmxn() -> float:
-    if FX_OVERRIDE:
-        try:
-            return float(FX_OVERRIDE)
-        except:
-            pass
-    fx = safe_download("USDMXN=X", period="1d", interval="1m")
-    if not fx.empty:
-        return float(fx["Close"].iloc[-1])
-    # Fallback razonable
-    log("⚠️ No se pudo obtener USDMXN=X, usando 18.5 como fallback")
-    return 18.5
-
-def calc_pnl(price: float, cost: float, shares: int, fx: float):
+def compute_pl(shares, cost, price):
     pnl_usd = (price - cost) * shares
-    pnl_mxn = pnl_usd * fx
+    pnl_mxn = pnl_usd * USD_MXN
     return pnl_usd, pnl_mxn
 
-def decide_action(price: float, vol_today: float, vol20_avg: float):
-    """
-    Aplica reglas A/B/C. Devuelve (acción, razón)
-    """
-    # C primero (protección)
-    if price <= STOP_ALL:
-        return "SELL ALL", f"C: precio <= ${STOP_ALL:.2f}"
-    # A
-    if price >= TAKE_PROFIT:
-        # Podrías afinar: si >= 55 y volumen alto, activar B
-        if price >= MOMO_PRICE and vol_today >= MOMO_VOL_X * vol20_avg:
-            return "SELL 50% / TRAIL", f"B: precio >= ${MOMO_PRICE:.2f} y vol >= {int(MOMO_VOL_X*100)}% media 20d"
-        return "TAKE-PROFIT PARTIAL", f"A: precio >= ${TAKE_PROFIT:.2f}"
-    # B puro (momo sin tocar aún A)
-    if price >= MOMO_PRICE and vol_today >= MOMO_VOL_X * vol20_avg:
-        return "SELL 50% / TRAIL", f"B: precio >= ${MOMO_PRICE:.2f} y vol >= {int(MOMO_VOL_X*100)}% media 20d"
-    # Default
-    return "HOLD", "Ninguna condición cumplida."
+# ============ LÓGICA ============
 
-def build_report_line(ticker: str, price: float, vol_today: int, vol20_avg: float):
-    return f"{ticker}: ${price:.2f} | Vol: {vol_today:,} vs prom20d: {int(vol20_avg):,}"
+def decide_action(price, vol_today, vol_avg20, negative_news=False):
+    """
+    Devuelve (action, reason)
+    """
+    # Regla C: proteger capital por precio o noticia negativa
+    if price is not None and price <= STOP_C:
+        return "SELL ALL", f"Precio <= {STOP_C:.2f}"
+    if negative_news:
+        return "SELL ALL", "Noticia negativa"
 
-# =========================
-# Main
-# =========================
+    # Regla A: toma parcial
+    if price is not None and price >= TAKE_PROFIT_A:
+        return "TAKE-PROFIT PARTIAL", f"Precio >= {TAKE_PROFIT_A:.2f}"
+
+    # Regla B: momentum + volumen
+    if price is not None and vol_today and vol_avg20:
+        if price >= MOMO_PRICE_B and vol_today >= MOMO_VOL_X * vol_avg20:
+            return "MOMENTUM: SELL 50% / TRAIL", f"Precio >= {MOMO_PRICE_B:.2f} y Vol >= {MOMO_VOL_X:.1f}× promedio"
+
+    # Si nada se cumple
+    return "HOLD", "Ninguna condición activa"
+
 def main():
-    tickers = load_portfolio()
-    fx = get_fx_usdmxn()
+    # leer portfolio.json
+    with open("portfolio.json","r") as f:
+        portfolio = json.load(f)
+    pos = portfolio.get(TICKER)
+    if not pos:
+        send_telegram(f"❗No encontré {TICKER} en portfolio.json")
+        return
 
-    log(f"Portafolio: {tickers}")
-    log(f"FX USD/MXN: {fx:.4f}")
+    shares = int(pos["shares"])
+    cost   = float(pos["buy_price"])
 
-    lines = []
-    cytk_price = None
-    cytk_vol_today = None
-    cytk_vol20 = None
+    price, vol_today, vol_avg20 = robust_last_price_and_volume(TICKER)
+    if price is None:
+        send_telegram("⚠️ No pude obtener precio de CYTK (fuera de horario/limite de datos). Intenta más tarde.")
+        return
 
-    for t in tickers:
-        try:
-            price, vol_today, vol20_avg = get_last_price_volume(t)
-            lines.append(build_report_line(t, price, vol_today, vol20_avg))
-            if t.upper() == "CYTK":
-                cytk_price = price
-                cytk_vol_today = vol_today
-                cytk_vol20 = vol20_avg
-        except Exception as e:
-            lines.append(f"{t}: ❌ {e}")
+    pnl_usd, pnl_mxn = compute_pl(shares, cost, price)
+    # (placeholder) noticias negativas detectadas por otra parte del flujo
+    negative = False
 
-    # Si CYTK está en la lista, calcula P/L y reglas
-    action = "HOLD"
-    reason = "—"
-    pnl_usd = pnl_mxn = 0.0
+    action, reason = decide_action(price, vol_today, vol_avg20, negative_news=negative)
 
-    if "CYTK" in [t.upper() for t in tickers] and cytk_price is not None:
-        pnl_usd, pnl_mxn = calc_pnl(cytk_price, CYTK_COST, CYTK_SHARES, fx)
-        action, reason = decide_action(cytk_price, cytk_vol_today, cytk_vol20)
-
-    # Mensaje
-    now = datetime.now(timezone.utc).astimezone()
-    header = "📊 REPORTE ATLAS"
-    when = now.strftime("%Y-%m-%d %H:%M:%S %Z")
-    body = "\n".join(lines)
-
-    if cytk_price is not None:
-        body += (
-            f"\n\nCYTK P/L: ${pnl_usd:,.2f} USD | ${pnl_mxn:,.2f} MXN"
-            f"\nReglas:  A) {TAKE_PROFIT:.2f}  |  B) {MOMO_PRICE:.2f} y {int(MOMO_VOL_X*100)}% vol  |  C) {STOP_ALL:.2f}"
-        )
-
-    footer = f"\n\n✅ ACCIÓN: {action}\nRazón: {reason}"
-
-    msg = f"{header}\n{when}\n\n{body}{footer}"
-
-    print("\n" + msg + "\n")
+    ts = dt.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+    msg = (
+        f"<b>📊 REPORTE {TICKER}</b>\n"
+        f"<b>Fecha/Hora:</b> {ts}\n"
+        f"<b>Precio:</b> ${price:.2f} USD\n"
+        f"<b>Vol hoy:</b> {vol_today if vol_today is not None else 'N/D'}\n"
+        f"<b>Vol 20d:</b> {int(vol_avg20) if vol_avg20 else 'N/D'}\n"
+        f"<b>P/L:</b> ${pnl_usd:.2f} USD | ${pnl_mxn:.2f} MXN (fx≈{USD_MXN})\n\n"
+        f"<b>✅ ACCIÓN:</b> {action}\n"
+        f"<i>Razón:</i> {reason}\n"
+        f"Reglas: A){TAKE_PROFIT_A:.2f} | B){MOMO_PRICE_B:.2f}+Vol≥{MOMO_VOL_X:.1f}× | C){STOP_C:.2f} o noticia negativa"
+    )
     send_telegram(msg)
 
 if __name__ == "__main__":
