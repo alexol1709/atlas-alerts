@@ -8,7 +8,37 @@ from datetime import datetime, timezone
 import requests, time
 import yfinance as yf
 import pandas as pd
+import os, math, json, urllib.parse
 
+def _alpha_json(function: str, params: dict) -> dict | None:
+    key = os.environ.get("ALPHAVANTAGE_KEY")
+    if not key: return None
+    base = "https://www.alphavantage.co/query"
+    q = {"function": function, "apikey": key, **params}
+    url = f"{base}?{urllib.parse.urlencode(q)}"
+    try:
+        r = requests.get(url, timeout=15)
+        r.raise_for_status()
+        data = r.json()
+        if "Note" in data or "Information" in data:
+            return None
+        return data
+    except Exception:
+        return None
+
+def get_last_price_fast(ticker: str) -> float | None:
+    px = None
+    # 1) Yahoo
+    try:
+        sess = _yf_session()
+        q = yf.Ticker(ticker, session=sess).fast_info
+        px = float(q.get("last_price") or q.get("lastPrice") or 0.0)
+    except Exception:
+        px = None
+    # 2) Alpha Vantage si Yahoo falla
+    if not px or px <= 0:
+        px = get_last_price_av(ticker)
+    return px if px and px > 0 else None
 def _yf_session():
     s = requests.Session()
     # User-Agent “real” para que Yahoo no bloquee
