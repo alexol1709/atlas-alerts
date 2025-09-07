@@ -1,4 +1,0 @@
-yfinance
-python-telegram-bot
-pandas
-requests
